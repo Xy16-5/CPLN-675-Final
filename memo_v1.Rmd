@@ -1,0 +1,1592 @@
+---
+title: "Urban Growth Modeling for Pittsburgh Metropolitan Statistical Area"
+subtitle: "Planning Memo to Southwestern Pennsylvania Commission"
+author: "[Xinyi Qiu](https://xy16-5.github.io/) and [Gillian Xuezhu Zhao](https://gillianzhaoxz.github.io/web/)"
+date: "5/10/2021"
+output:   
+  html_document:
+    code_folding: hide
+    toc: TRUE
+    toc_float: TRUE
+    number_sections: TRUE
+    theme: cerulean
+---
+```{r setup knitr, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,message=FALSE,warning=FALSE,include=FALSE)
+options(scipen=99)
+```
+```{r setwd, include=FALSE}
+#Xinyi's
+#setwd("~/Desktop/Courses/Land Use and Environmental Modeling/Final/Data")
+#Gillian's
+setwd("G:/UPenn/CPLN675_LandUse_and_EnvironmentalModeling/final/CPLN-675-Final/Data")
+getwd()
+```
+```{r Set up, include=FALSE, purl = TRUE}
+library(tidyverse)
+library(sf)
+library(raster)
+library(knitr)
+library(formattable)  # I use formattable to replace the kableExtra
+# library(kableExtra)
+library(tidycensus)
+library(tigris)
+options(tigris_class = "sf")
+options(tigris_use_cache = TRUE)
+library(FNN)
+library(QuantPsyc)
+library(caret)
+library(yardstick)
+library(pscl)
+library(plotROC) 
+library(ggrepel)
+library(pROC)
+library(grid)
+library(gridExtra)
+library(viridis)
+library(exactextractr)
+library(stringr)
+library(censusapi)
+library(ROCR)
+library(igraph)
+library(stargazer)
+
+plotTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle = element_text(face="italic"),
+    plot.caption = element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_line("grey80", size = 0.1),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    strip.background = element_rect(fill = "grey80", color = "white"),
+    strip.text = element_text(size=12),
+    axis.title = element_text(size=12),
+    axis.text = element_text(size=10),
+    plot.background = element_blank(),
+    legend.background = element_blank(),
+    legend.title = element_text(colour = "black", face = "italic"),
+    legend.text = element_text(colour = "black", face = "italic"),
+    strip.text.x = element_text(size = 14)
+  )
+}
+
+mapTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 16,colour = "black"),
+    plot.subtitle=element_text(face="italic"),
+    plot.caption=element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    strip.text.x = element_text(size = 14))
+}
+
+palette2 <- c("#41b6c4","#253494")
+palette4 <- c("#a1dab4","#41b6c4","#2c7fb8","#253494")
+palette5 <- c("#ffffcc","#a1dab4","#41b6c4","#2c7fb8","#253494")
+palette10 <- c("#f7fcf0","#e0f3db","#ccebc5","#a8ddb5","#7bccc4",
+               "#4eb3d3","#2b8cbe","#0868ac","#084081","#f7fcf0")
+```
+```{r function}
+quintileBreaks <- function(df,variable) {
+    as.character(quantile(df[[variable]],
+                          c(.01,.2,.4,.6,.8),na.rm=T))
+}
+
+#This function can be used to convert a polygon sf to centroids xy coords.
+xyC <- function(aPolygonSF) {
+  as.data.frame(
+    cbind(x=st_coordinates(st_centroid(aPolygonSF))[,1],
+          y=st_coordinates(st_centroid(aPolygonSF))[,2]))
+} 
+
+#this function convert a raster to a data frame so it can be plotted in ggplot
+rast <- function(inRaster) {
+  data.frame(
+    xyFromCell(inRaster, 1:ncell(inRaster)), 
+    value = getValues(inRaster)) }
+
+nn_function <- function(measureFrom,measureTo,k) {
+  #convert the sf layers to matrices
+  measureFrom_Matrix <-
+    as.matrix(measureFrom)
+  measureTo_Matrix <-
+    as.matrix(measureTo)
+  nn <-   
+    get.knnx(measureTo, measureFrom, k)$nn.dist
+    output <-
+    as.data.frame(nn) %>%
+    rownames_to_column(var = "thisPoint") %>%
+    gather(points, point_distance, V1:ncol(.)) %>%
+    arrange(as.numeric(thisPoint)) %>%
+    group_by(thisPoint) %>%
+    summarize(pointDistance = mean(point_distance)) %>%
+    arrange(as.numeric(thisPoint)) %>% 
+    dplyr::select(-thisPoint) %>%
+    pull()
+  
+  return(output)  
+}
+
+aggregateRaster <- function(inputRasterList, theFishnet) {
+  #create an empty fishnet with the same dimensions as the input fishnet
+  theseFishnets <- theFishnet %>% dplyr::select()
+  #for each raster in the raster list
+  for (i in inputRasterList) {
+  #create a variable name corresponding to the ith raster
+  varName <- names(i)
+  #convert raster to points as an sf
+    thesePoints <-
+      rasterToPoints(i) %>%
+      as.data.frame() %>%
+      st_as_sf(coords = c("x", "y"), crs = st_crs(theFishnet)) %>%
+      filter(.[[1]] == 1)
+  #aggregate to the fishnet
+    thisFishnet <-
+      aggregate(thesePoints, theFishnet, length) %>%
+      mutate(!!varName := ifelse(is.na(.[[1]]),0,1))
+  #add to the larger fishnet
+    theseFishnets <- cbind(theseFishnets,thisFishnet)
+  }
+  #output all aggregates as one large fishnet
+   return(theseFishnets)
+  }
+```
+```{r load pittsburgh boundary, include=FALSE}
+# Xinyi's
+# Pittsburgh_MSA <-
+#   st_read("Pittsburgh_MSA/Pittsburgh_MSA.shp") %>%
+#   st_transform(102741) #102003
+# 
+# Pittsburgh_MSA_boundary <- Pittsburgh_MSA %>%
+#   group_by(STATEFP) %>%
+#   summarise() %>%
+#   st_transform(102741)
+
+# Gillian's
+Pittsburgh_MSA <-
+  st_read("Pittsburgh_MSA/Pittsburgh_MSA.shp") %>%
+  st_transform("ESRI:102741") #102003
+
+Pittsburgh_MSA_boundary <- Pittsburgh_MSA %>%
+  group_by(STATEFP) %>%
+  summarise() %>%
+  st_transform("ESRI:102741")
+
+MSA_fishnet <- 
+  st_make_grid(Pittsburgh_MSA_boundary, 3000) %>%
+  st_sf()
+
+MSA_fishnet <- 
+  MSA_fishnet[Pittsburgh_MSA_boundary,]
+```
+
+# Introduction
+Since its days as the Forge of America, Pittsburgh, the biggest city in Pittsburgh MSA, has changed dramatically in its over 250-year history. With decreasing population, decayed structures, and yet suburban sprawl, the region is eager to redevelop many of its areas and neighborhoods^[Lamorella, J. (2013). Crisis + opportunity. Re*imagining Pittsburgh. http://pittsburghcriticalpoints.weebly.com/crisis.html].
+
+We completed the growth modeling project in anticipation of the Southwestern Pennsylvania Commission (SPC)’s next large-scale comprehensive planning process for Pittsburgh Metropolitan Statistical Area (MSA). 
+```{r county plot, include=T}
+ggplot()+
+  labs(title="Pittsburgh MSA Boundary and Counties",
+       subtitle="Illustration of Fishnet, 3000 foot resolution")+
+  geom_sf(data=Pittsburgh_MSA, aes(fill=as.factor(NAME)))+
+  geom_sf(data=MSA_fishnet, fill=NA, color="gray", alpha=0.5) +
+  geom_sf(data=Pittsburgh_MSA, fill=NA, size=1.5, aes(colour=as.factor(NAME)))+
+  scale_color_viridis(discrete = T,
+                     name ="County")+
+  scale_fill_viridis(discrete = T,
+                     name ="County")+
+  mapTheme()
+```
+
+We forecasted change in development for 2021 with patterns from 2001-2011 through a binary logistic regression model per each 3000 foot fishnet grid. 
+```{r load lc data}
+lc_2001 <- raster("msa_2001lc.tif")
+lc_2001 <-projectRaster(lc_2001,crs=crs(Pittsburgh_MSA))
+
+lc_2011 <- raster ("msa_2011lc.tif")
+lc_2011 <- projectRaster(lc_2011,crs=crs(Pittsburgh_MSA) )
+
+# aggregate
+lc_2001 <- raster::aggregate(lc_2001, fact = 30, fun = modal)
+lc_2011 <- raster::aggregate(lc_2011, fact = 30, fun = modal)
+
+# calculate
+lc_change <- (lc_2001 != lc_2011) * lc_2011
+```
+```{r lc plot}
+reclassMatrix <- 
+  matrix(c(
+    0,12,0,
+    12,24,1,
+    24,Inf,0),
+    ncol=3, byrow=T)
+lc_change_reclass <- reclassify(lc_change, reclassMatrix)
+lc_change_reclass[lc_change_reclass < 1] <- 0
+names(lc_change_reclass) <- "lc_change_reclass"
+
+lc_change_extract <- data.frame(exact_extract(lc_change_reclass, MSA_fishnet, fun = "mode"))
+names(lc_change_extract) <- "developed_2011"
+
+MSA_fishnet01 <- cbind(data.frame(MSA_fishnet),lc_change_extract)
+
+# Xinyi's
+# MSA_fishnet <- 
+#   MSA_fishnet %>%
+#   st_as_sf(.) %>%
+#   st_transform(102741)
+
+MSA_fishnet01 <- 
+  MSA_fishnet01 %>%
+  st_as_sf(.) %>%
+  st_transform("ESRI:102741")
+```
+[] Land Use change plot
+```{r dev plot, include=T}
+ggplot() +
+   geom_sf(data=MSA_fishnet01,aes(fill=as.factor(developed_2011)),color='transparent')+
+   scale_fill_viridis(discrete=TRUE, name ="Land Cover\nChange",labels=c("No Change","New Development")) +
+  labs(title="Pittsburgh MSA Development Land Use Change (2001 - 2011)") +
+  mapTheme()
+```
+[] Land cover types plot
+```{r lc type, include=T}
+ggplot() +
+  geom_sf(data=Pittsburgh_MSA_boundary) +
+  geom_raster(data=rast(lc_2001) %>% na.omit %>% filter(value > 0), 
+              aes(x,y,fill=as.factor(round(value,0)))) +
+  scale_fill_viridis(discrete=TRUE,direction=-1, name ="") +
+  labs(title = "Pittsburgh MSA Land Cover, 2001") +
+  mapTheme()
+```
+```{r lc reclass}
+developed <- lc_2001 == 21 | lc_2001 == 22 | lc_2001 == 23 | lc_2001 == 24
+forest <- lc_2001 == 41 | lc_2001 == 42 | lc_2001 == 43 
+farm <- lc_2001 == 81 | lc_2001 == 82 
+wetlands <- lc_2001 == 90 | lc_2001 == 95 
+otherUndeveloped <- lc_2001 == 52 | lc_2001 == 71 | lc_2001 == 31 
+water <- lc_2001 == 11
+names(developed) <- "developed"
+names(forest) <- "forest"
+names(farm) <- "farm"
+names(wetlands) <- "wetlands"
+names(otherUndeveloped) <- "otherUndeveloped"
+names(water) <- "water"
+
+layer_list <- list(developed, wetlands, forest, farm, otherUndeveloped, water)
+names(layer_list) <- c("developed_2001", "wetlands_2001", "forest_2001", 
+                       "farm_2001", "otherUndeveloped_2001", "water_2001")
+
+fish_extract <- function(fishnet, layers) {
+  
+  extract_list <- exact_extract(layers, fishnet, fun = "mode")
+  
+  return(extract_list)
+  
+}
+
+
+lc_2001_extracts <- lapply(layer_list, fish_extract, fishnet = MSA_fishnet01)
+lc_2001_extracts <- data.frame(do.call(cbind, args = lc_2001_extracts))
+MSA_fishnet01 <- cbind(data.frame(MSA_fishnet01), lc_2001_extracts)
+
+# Xinyi's
+# MSA_fishnet <- 
+#   MSA_fishnet %>%
+#   st_as_sf(.) %>%
+#   st_transform(102741)
+
+MSA_fishnet <- 
+  MSA_fishnet %>%
+  st_as_sf(.) %>%
+  st_transform("ESRI:102741")
+
+lc_2001_lcvar <-
+  MSA_fishnet01 %>%
+  gather(var,value,developed_2001:water_2001) %>%
+  dplyr::select(var,value,geometry) %>%
+  st_as_sf()
+
+lc_2001_lcvar$var <- as.factor(str_sub(lc_2001_lcvar$var,1,-6))
+```
+```{r lc type plot1, include=T}
+ggplot()+
+  geom_sf(data=lc_2001_lcvar,aes(fill=as.factor(value)),color='transparent')+
+  facet_wrap(~var)+
+  scale_fill_viridis(discrete=TRUE, labels=c("Other","Land Cover"),name ="")+
+    labs(title = "Land cover types, 2001",
+         subtitle = "As fishnet centroids") +
+   mapTheme()
+```
+[] Development change overlay with
+```{r census}
+MSAPop10 <-
+  get_decennial(geography = "tract",variables = "P001001",year=2010,
+                state=42,county=c("Allegheny County","Armstrong County","Beaver County","Butler County","Fayette County",
+                                  "Washington County","Westmoreland County"),geometry=TRUE) %>%
+  rename(pop_2010 = value) %>%
+  st_transform(st_crs(MSA_fishnet))
+
+Sys.setenv(CENSUS_KEY = "2c3e9f9d2d65abab5f7b81fe418054415d363a43")
+MSAPop00 <-getCensus(name = "dec/sf1", 
+                  vintage = 2000, 
+                  vars = c("NAME","P001001"),
+                  region = "tract:*", 
+                  regionin = "state:42+county:003,005,007,019,051,125,129")
+MSAPop00$label <- paste0(MSAPop00$county,"0",MSAPop00$tract)
+for (i in 1:721){
+  if(nchar(MSAPop00[i,]$label)!=10){
+    MSAPop00[i,]$label <-paste0(MSAPop00[i,]$label,"00")
+  }
+  
+}
+
+# Xinyi's 
+# MSAtracts00 <- st_read("MSAtracts/MSAtracts.shp") %>%
+#  st_transform(102741)
+
+# Gillian's
+MSAtracts00 <- st_read("MSAtracts/MSAtracts.shp") %>%
+  st_transform("ESRI:102741")
+
+MSAtracts00$tract <-substr(MSAtracts00$GISJOIN2 ,4,13)
+MSAtracts00$tract <- as.character(MSAtracts00$tract)
+
+MSAPop00 <- left_join(MSAtracts00, MSAPop00,by=c("tract"="label"))
+MSAPop00 <- MSAPop00 %>%
+  dplyr::select(GISJOIN2,NAME,P001001,geometry) %>%
+  rename(GEOID = GISJOIN2,pop_2000 = P001001)
+```
+  [] Population decline plot (optional) and comparison map from Census data
+```{r pop0010 plot, include=T}
+grid.arrange(
+ggplot() +
+  geom_sf(data = MSAPop00, aes(fill=factor(ntile(pop_2000,5))), colour=NA) +
+  scale_fill_manual(values = palette5,
+                    labels=quintileBreaks(MSAPop00,"pop_2000"),
+                   name="Quintile\nBreaks") +
+  labs(title="Population, Pittsburgh MSA: 2000") +
+  mapTheme(),
+
+ggplot() +
+  geom_sf(data = MSAPop10, aes(fill=factor(ntile(pop_2010,5))), colour=NA) +
+  scale_fill_manual(values = palette5,
+                    labels=quintileBreaks(MSAPop10,"pop_2010"),
+                   name="Quintile\nBreaks") +
+  labs(title="Population, Pittsburgh MSA: 2010") +
+  mapTheme(), ncol=2)
+```
+```{r pop0010 fishnet}
+MSA_fishnet01 <-
+  MSA_fishnet01 %>%
+  rownames_to_column("fishnetID") %>%
+  mutate(fishnetID = as.numeric(fishnetID)) 
+
+fishnetPop00 <-
+  st_interpolate_aw(MSAPop00["pop_2000"],MSA_fishnet01,extensive=TRUE) %>%
+  as.data.frame(.) %>%
+  left_join(MSA_fishnet01,.,by="geometry") %>%
+  mutate(pop_2000=replace_na(pop_2000,0)) %>%
+  dplyr::select(fishnetID,pop_2000)
+
+fishnetPop10 <-
+  st_interpolate_aw(MSAPop10["pop_2010"],MSA_fishnet01,extensive=TRUE) %>%
+  as.data.frame(.) %>%
+  left_join(MSA_fishnet01,.,by="geometry") %>%
+  mutate(pop_2010=replace_na(pop_2010,0)) %>%
+  dplyr::select(pop_2010,fishnetID)
+
+fishnetPop <- 
+  left_join(fishnetPop00,fishnetPop10, by="fishnetID") %>%
+  dplyr::select(pop_2000,pop_2010,fishnetID) %>%
+  mutate(pop_Change = pop_2010 - pop_2000)
+
+
+
+MSA_fishnet01 <- left_join(MSA_fishnet01,data.frame(fishnetPop),by="fishnetID") %>%
+  st_as_sf()
+
+```
+  [] Dist to highway
+```{r highway1, include=FALSE}
+PittsburghHighways <-
+  st_read("MSAHighways/MSAHighways.shp") %>%
+  st_transform(st_crs(Pittsburgh_MSA)) %>%
+  st_intersection(Pittsburgh_MSA_boundary)
+
+PittsburghHighways <- 
+  PittsburghHighways %>%
+  dplyr::select(CTY_CODE, DISTRICT_N,MAINT_FUNC,geometry)
+```
+```{r highway plot, include=T}
+ggplot() +
+  geom_sf(data=MSA_fishnet01, aes(fill=as.factor(developed_2001)),color='transparent') +
+  geom_sf(data=PittsburghHighways,color='white') +
+  scale_fill_viridis(discrete=TRUE, name ="Land Cover\nChange",labels=c("No Change","New Development")) +
+  labs(title = "Pittsburgh MSA New Development and Highways") +
+  mapTheme()
+```
+
+Our findings aim to help planners model the interplay between supply and demand-side insights and guide new development across to places where growth can have economic and sustainable impacts.
+
+# Exploratory Analysis
+## Feature Engineering
+[] Distance to highway
+```{r dist to highway}
+emptyRaster <- lc_change
+emptyRaster[] <- NA
+
+highway_raster <- 
+  as(PittsburghHighways,'Spatial') %>%
+  rasterize(.,emptyRaster)
+
+# writeRaster(highway_raster,"highway_raster.tif")
+
+highway_raster_distance <- distance(highway_raster)
+names(highway_raster_distance) <- "distance_highways"
+
+highwayPoints <-
+  rasterToPoints(highway_raster_distance) %>%
+  as.data.frame() %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(MSA_fishnet01))
+
+highwayPoints_fishnet <- 
+  aggregate(highwayPoints, MSA_fishnet01, mean) %>%
+  mutate(distance_highways = ifelse(is.na(distance_highways),0,distance_highways)) %>%
+  rownames_to_column("fishnetID") %>%
+  mutate(fishnetID = as.numeric(fishnetID)) 
+  
+
+highwayPoints_fishnet <-highwayPoints_fishnet %>%
+  st_drop_geometry(.)
+
+MSA_fishnet01 <- left_join(MSA_fishnet01,highwayPoints_fishnet,by="fishnetID") %>%
+  st_as_sf()
+
+
+```
+```{r dist to highway plot, include=T}
+ggplot() +
+  geom_sf(data=Pittsburgh_MSA_boundary) +
+  geom_point(data=MSA_fishnet01 , aes(x=xyC(MSA_fishnet01 )[,1], 
+                                             y=xyC(MSA_fishnet01)[,2], 
+                 colour=factor(ntile(distance_highways,5))),size=1.5) +
+  scale_colour_manual(values = palette5,
+                      labels=substr(quintileBreaks(MSA_fishnet01 ,"distance_highways"),1,8),
+                      name="Quintile\nBreaks") +
+  geom_sf(data=PittsburghHighways, colour = "red") +
+  labs(title = "Distance to Highways",
+       subtitle = "As fishnet centroids; Highways visualized in red") +
+  mapTheme()
+```
+
+[] Spatial lag of dev
+```{r spatial lag dev}
+MSA_fishnet01$lagDevelopment <-
+  nn_function(xyC(MSA_fishnet01),
+              xyC(filter(MSA_fishnet01,developed_2001==1)),
+              2)
+```
+```{r spatial lag dev plot, include=T}
+ggplot() +
+  geom_sf(data=Pittsburgh_MSA_boundary) +
+  geom_point(data=MSA_fishnet01, 
+             aes(x=xyC(MSA_fishnet01)[,1], y=xyC(MSA_fishnet01)[,2], 
+                 colour=factor(ntile(lagDevelopment,5))), size=1.5) +
+  scale_colour_manual(values = palette5,
+                     labels=substr(quintileBreaks(MSA_fishnet01,"lagDevelopment"),1,7),
+                     name="Quintile\nBreaks") +
+  labs(title = "Spatial lag to 2001 development",
+       subtitle = "As fishnet centroids") +
+  mapTheme()
+```
+```{r final dataset}
+colnames(MSA_fishnet01)[which (names(MSA_fishnet01)=="developed_2011")] <-"lc_change"
+```
+```{r dataset fishnet}
+if ( any("pop_2000.x" == names(MSA_fishnet01))) {
+  MSA_fishnet01 <- 
+    MSA_fishnet01 %>%
+    mutate(pop_2000 = pop_2000.x,
+         pop_2010 = pop_2010.x,
+         pop_Change = pop_Change.x)
+} 
+
+dat <-
+  MSA_fishnet01 %>%
+  dplyr::select(lc_change, developed_2001,wetlands_2001,forest_2001,farm_2001,otherUndeveloped_2001,water_2001,pop_2000,pop_2010,pop_Change,
+                distance_highways, lagDevelopment)  %>%
+  st_join(Pittsburgh_MSA) %>%
+  mutate(developed11 = ifelse(lc_change==1 & developed_2001 == 1,0,developed_2001)) %>%
+  filter(water_2001 == 0)
+
+dat$lc_change <- as.factor(dat$lc_change)
+```
+
+[] All existing comparison plots
+```{r, include=T}
+dat %>%
+  dplyr::select(distance_highways,lagDevelopment,lc_change) %>%
+  gather(Variable, Value, -lc_change, -geometry) %>%
+  ggplot(., aes(lc_change, Value, fill=lc_change)) + 
+    geom_bar(position = "dodge", stat = "summary", fun = "mean") +
+    facet_wrap(~Variable) +
+    scale_fill_manual(values = palette2,
+                      labels=c("No Change","New Development"),
+                      name="") +
+    labs(title="New development as a function of the countinuous variables") +
+    plotTheme() 
+```
+
+```{r, include=T}
+grid.arrange(
+dat %>%
+  dplyr::select(pop_2000,pop_2010,pop_Change,lc_change) %>%
+  mutate(pop_Change=pop_Change) %>%
+  gather(Variable, Value, -lc_change, -geometry) %>%
+  ggplot(., aes(lc_change, Value, fill=lc_change)) + 
+    geom_bar(position = "dodge", stat = "summary", fun = "mean") +
+    facet_wrap(~Variable) +
+    scale_fill_manual(values = palette2,
+                      labels=c("No Change","New Development"),
+                      name="") +
+    labs(title="New development as a function of factor variables",
+         subtitle = "Original Population Change") +
+    plotTheme(),
+
+dat %>%
+  dplyr::select(pop_2000,pop_2010,pop_Change,lc_change) %>%
+  mutate(pop_Change=pop_Change*10) %>%
+  gather(Variable, Value, -lc_change, -geometry) %>%
+  ggplot(., aes(lc_change, Value, fill=lc_change)) + 
+    geom_bar(position = "dodge", stat = "summary", fun = "mean") +
+    facet_wrap(~Variable) +
+    scale_fill_manual(values = palette2,
+                      labels=c("No Change","New Development"),
+                      name="") +
+    labs(title="New development as a function of factor variables",
+         subtitle = "Multiply Population Change by 10") +
+    plotTheme(),ncol=1)
+```
+
+```{r, include=T}
+table <-dat %>%
+  dplyr::select(lc_change:otherUndeveloped_2001) %>%
+  gather(Land_Cover_Type, Value, -lc_change, -geometry) %>%
+   st_set_geometry(NULL) %>%
+     group_by(lc_change, Land_Cover_Type) %>%
+     summarize(n = sum(as.numeric(Value))) %>%
+     ungroup() %>%
+    mutate(Conversion_Rate = paste0(round(100 * n/sum(n), 2), "%")) %>%
+    filter(lc_change == 1) %>%
+  dplyr::select(Land_Cover_Type,Conversion_Rate) 
+table <- data.frame(table)
+table$Land_Cover_Type[1]<-"Developed"
+table$Land_Cover_Type[2]<-"Farm"
+table$Land_Cover_Type[3]<-"Forest"
+table$Land_Cover_Type[4]<-"Other Undeveloped"
+formattable(table,
+            align=c("l","l"))
+```
+
+# Modeling
+## Model Selection
+[] six models
+```{r model}
+set.seed(3456)
+trainIndex <- 
+  createDataPartition(dat$developed_2001, p = .50,
+                                  list = FALSE,
+                                  times = 1)
+datTrain <- dat[ trainIndex,]
+datTest  <- dat[-trainIndex,]
+```
+```{r six models}
+Model1 <- glm(lc_change ~ wetlands_2001 + forest_2001 + farm_2001 + otherUndeveloped_2001, 
+              family="binomial"(link="logit"), data = datTrain)
+
+Model2 <- glm(lc_change ~ wetlands_2001 + forest_2001  + farm_2001 + otherUndeveloped_2001 + lagDevelopment, 
+              family="binomial"(link="logit"), data = datTrain)
+              
+Model3 <- glm(lc_change ~ wetlands_2001 + forest_2001  + farm_2001 + otherUndeveloped_2001 + lagDevelopment + pop_2000, 
+              family="binomial"(link="logit"), data = datTrain)          
+              
+Model4 <- glm(lc_change ~ wetlands_2001 + forest_2001  + farm_2001 + otherUndeveloped_2001 + lagDevelopment + pop_2000 + 
+              pop_2010, 
+              family="binomial"(link="logit"), data = datTrain)              
+            
+Model5 <- glm(lc_change ~ wetlands_2001 + forest_2001  + farm_2001 + otherUndeveloped_2001 + lagDevelopment + pop_Change, 
+              family="binomial"(link="logit"), data = datTrain)              
+              
+Model6 <- glm(lc_change ~ wetlands_2001 + forest_2001  + farm_2001 + otherUndeveloped_2001 + lagDevelopment + pop_Change + 
+              distance_highways, 
+              family="binomial"(link="logit"), data = datTrain) 
+```
+```{r stargazer, results='asis'}
+stargazer(Model1, Model2, Model3, Model4, Model5, Model6, type='html')
+```
+[] R squared plot
+```{r compare models, include=T}
+modelList <- paste0("Model", 1:6)
+map_dfc(modelList, function(x)pR2(get(x)))[4,] %>%
+  setNames(paste0("Model",1:6)) %>%
+  gather(Model,McFadden) %>%
+  ggplot(aes(Model,McFadden)) +
+    geom_bar(stat="identity", fill="#41b6c4") +
+    labs(title= "McFadden R-Squared by Model") +
+    plotTheme()
+```
+
+## Model Outcome {.tabset .tabset-fade .tabset-pills}
+[] Probability histogram
+```{r histogram prob}
+testSetProbs <- 
+  data.frame(class = datTest$lc_change,
+             probs = predict(Model6, datTest, type="response")) 
+```
+### Original plot
+```{r density outcome, include=T}
+ggplot(testSetProbs, aes(probs)) +
+  geom_density(aes(fill=class), alpha=0.5) +
+  scale_fill_manual(values = palette2,
+                    labels=c("No Change","New Development")) +
+  labs(title = "Density plot of test set predicted probabilities",
+       x="Predicted Probabilities",y="Density") +
+  plotTheme()
+```
+### Zoomed-in plot
+```{r density outcome zoomed, include=T}
+# zoom closer
+ggplot(testSetProbs, aes(probs)) +
+  geom_density(aes(fill=class), alpha=0.5) +
+  xlim(0, 0.15)+
+  scale_fill_manual(values = palette2,
+                    labels=c("No Change","New Development")) +
+  labs(title = "Density plot of test set predicted probabilities",
+       x="Predicted Probabilities",y="Density") +
+  plotTheme()
+```
+## {-}
+
+[] Probability threshold selection table
+```{r prob threshold selection}
+options(yardstick.event_first = FALSE)
+
+classProbs <- predict (Model6, datTest, type='response')
+
+testProbs <- data.frame (obs = as.numeric(datTest$developed11), pred = classProbs)
+
+pred <- prediction(testProbs[is.na(testProbs$pred)==FALSE,]$pred,testProbs[is.na(testProbs$pred)==FALSE,]$obs)
+f.perf<-performance(pred,"f")
+plot(f.perf)
+
+F.score <-c(f.perf@y.values[[1]])
+cutoff<-c(f.perf@x.values[[1]])
+F.score_table<-data.frame(cbind(F.score,cutoff))
+F.score_table[which.max(F.score_table$F.score),] #0.0049; but we don't want their balance
+
+testSetProbs <- 
+  testSetProbs %>% 
+  mutate(
+        predClass_005 = as.factor(ifelse(testSetProbs$probs >= 0.005 ,1,0)),
+        predClass_03 = as.factor(ifelse(testSetProbs$probs >= 0.03 ,1,0)), # V
+        predClass_05 = as.factor(ifelse(testSetProbs$probs >= 0.05 ,1,0))
+         ) 
+```
+```{r prob table, include=T}
+testSetProbs %>%
+  dplyr::select(-probs) %>%
+  gather(Variable, Value, -class) %>%
+  group_by(Variable) %>%
+  summarize(Sensitivity = round(yardstick::sens_vec(class,factor(Value)),2),
+            Specificity = round(yardstick::spec_vec(class,factor(Value)),2),
+            Accuracy = round(yardstick::accuracy_vec(class,factor(Value)),2)) %>% 
+  formattable(table,
+            align=c("l","l"))
+```
+```{r prob map, include=T}
+predsForMap <-         
+  dat %>%
+    mutate(probs = predict(Model6, dat, type="response") ,
+           Threshold_0.5_Pct = as.factor(ifelse(probs >= 0.005 ,1,0)),
+           Threshold_3_Pct =  as.factor(ifelse(probs >= 0.03, 1,0))) %>%
+    dplyr::select(lc_change,Threshold_0.5_Pct,Threshold_3_Pct) %>%
+    gather(Variable,Value, -geometry) %>%
+    st_cast("POLYGON")
+
+ggplot() +
+  geom_point(data=predsForMap, aes(x=xyC(predsForMap)[,1], y=xyC(predsForMap)[,2], colour=Value)) +
+  facet_wrap(~Variable) +
+  scale_colour_manual(values = palette2, labels=c("No Change","New Development"),
+                      name="") +
+  labs(title="Development predictions - Threshold comparison") + 
+  theme(legend.position="bottom") +
+  mapTheme()
+```
+```{r confusion matrix map, include=T}
+ConfusionMatrix.metrics <-
+  dat %>%
+    mutate(probs = predict(Model6, dat, type="response") ,
+           Threshold_0.5_Pct = as.factor(ifelse(probs >= 0.005 ,1,0)),
+           Threshold_3_Pct =  as.factor(ifelse(probs >= 0.03, 1,0))) %>%
+    mutate(TrueP_0.5 = ifelse(lc_change  == 1 & Threshold_0.5_Pct == 1, 1,0),
+           TrueN_0.5 = ifelse(lc_change  == 0 & Threshold_0.5_Pct == 0, 1,0),
+           TrueP_3 = ifelse(lc_change  == 1 & Threshold_3_Pct == 1, 1,0),
+           TrueN_3 = ifelse(lc_change  == 0 & Threshold_3_Pct == 0, 1,0)) %>%
+    dplyr::select(., starts_with("True")) %>%
+    gather(Variable, Value, -geometry) %>%
+    st_cast("POLYGON") 
+
+ggplot(data=ConfusionMatrix.metrics) +
+  geom_point(aes(x=xyC(ConfusionMatrix.metrics)[,1], 
+                 y=xyC(ConfusionMatrix.metrics)[,2], colour = as.factor(Value))) +
+  facet_wrap(~Variable) +
+  scale_colour_manual(values = palette2, labels=c("Correct","Incorrect"),
+                       name="") +
+  labs(title="Development predictions - map by confusion matrix") + 
+  theme(legend.position="bottom") +
+  mapTheme()
+```
+
+## Model Validation
+```{r spatial CV}
+spatialCV <- function(dataFrame, uniqueID, dependentVariable, modelName) {
+
+#initialize a data frame 
+endList <- list()
+
+#create a list that is all the spatial group unqiue ids in the data frame (ie counties)    
+  uniqueID_List <- unique(dataFrame[[uniqueID]])  
+  x <- 1
+  y <- length(uniqueID_List)
+  
+#create a counter and while it is less than the number of counties...  
+  while(x <= y) 
+  {
+#call a current county    
+    currentUniqueID <- uniqueID_List[x]
+#create a training set comprised of units not in that county and a test set of units
+#that are that county
+    training <- dataFrame[ which(dataFrame[[uniqueID]] != uniqueID_List[x]),]
+    testing <- dataFrame[ which(dataFrame[[uniqueID]] == uniqueID_List[x]),]
+#create seperate xy vectors
+    trainingX <- training[ , -which(names(training) %in% c(dependentVariable))]
+    testingX <- testing[ , -which(names(testing) %in% c(dependentVariable))]
+    
+    trainY <- training[[dependentVariable]]
+    testY <- testing[[dependentVariable]]
+#Calculate predictions on the test county as part of a data frame including the observed
+#outcome and the unique county ID    
+   thisPrediction <- 
+     data.frame(class = testY,
+                probs = predict(modelName, testingX, type="response"),
+                county = currentUniqueID) 
+
+#Row bind the predictions to a data farme
+   endList <- rbind(endList, thisPrediction)
+#iterate counter    
+    x <- x + 1 
+  } 
+#return the final list of counties and associated predictions  
+  return (as.data.frame(endList))
+}
+```
+```{r spatialCV counties}
+spatialCV_counties <-
+  spatialCV(dat,"NAME","lc_change", Model6) %>%
+  mutate(predClass = as.factor(ifelse(probs >= 0.03 ,1,0)))
+```
+```{r spatialCV table, include=T}
+spatialCV_metrics <-
+  spatialCV_counties %>% 
+    group_by(county) %>% 
+    summarize(Observed_Change = sum(as.numeric(as.character(class))),
+              Sensitivity = round(yardstick::sens_vec(class,predClass),2),
+              Specificity = round(yardstick::spec_vec(class,predClass),2),
+              Accuracy = round(yardstick::accuracy_vec(class,predClass),2)) 
+
+spatialCV_metrics %>%
+  formattable(table,
+            align=c("l","l"))
+```
+
+# 2021 Forecast
+## Demande-side Change
+```{r pop}
+dat <-
+  dat %>%
+  mutate(lagDevelopment = nn_function(xyC(.), xyC(filter(.,developed11 == 1)),2))
+
+countyPopulation_2021 <- 
+  data.frame(
+   NAME = 
+     c("Fayette","Washington","Westmoreland","Allegheny","Beaver","Armstrong","Butler"),
+   county_projection_2021 = 
+     c(129274,206865,58002,1216045,163929,64735,187853)) %>%
+   left_join(
+     dat %>%
+       st_set_geometry(NULL) %>%
+       group_by(NAME) %>%
+       summarize(county_population_2011 = round(sum(pop_2010))))
+
+# Data source: 2019 estimate from upitt https://www.ucsur.pitt.edu/perspectives.php?b=20221115818670
+```
+```{r pop proj, include=T}
+countyPopulation_2021 %>%
+  gather(Variable,Value, -NAME) %>%
+  ggplot(aes(reorder(NAME,-Value),Value)) +
+  geom_bar(aes(fill=Variable), stat = "identity") +
+  scale_fill_manual(values = palette2,
+                    labels=c("2021","2011"),
+                    name="Population") +
+  labs(title="Population Change by county: 2011 - 2021",
+       x="County", y="Population") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  plotTheme()
+```
+```{r demand scenario, include=T}
+dat_infill <-
+  dat %>%
+  #calculate population change
+    left_join(countyPopulation_2021) %>%
+    mutate(proportion_of_county_pop = pop_2010 / county_population_2011,
+           pop_2021.infill = proportion_of_county_pop * county_projection_2021,
+           pop_Change = round(pop_2021.infill - pop_2010),2) %>%
+    dplyr::select(-county_projection_2021, -county_population_2011, 
+                  -proportion_of_county_pop, -pop_2021.infill) %>%
+  #predict for 2021
+    mutate(predict_2021.infill = predict(Model6,. , type="response"))
+
+dat_infill %>%
+  ggplot() +  
+  geom_point(aes(x=xyC(dat_infill)[,1], y=xyC(dat_infill)[,2], colour = factor(ntile(predict_2021.infill,5)))) +
+  scale_colour_manual(values = palette5,
+                    labels=substr(quintileBreaks(dat_infill, "predict_2021.infill"),1,8),
+                    name="Quintile\nBreaks") +
+  geom_sf(data=Pittsburgh_MSA, fill=NA, colour="black", size=1.5) +
+  labs(title= "Development Demand in 2021: Predicted Probabilities") +
+  mapTheme()
+```
+
+```{r lc1101 plot, include=T}
+ggplot() +
+  geom_sf(data=Pittsburgh_MSA_boundary) +
+  geom_raster(data = rbind(rast(lc_2001) %>% mutate(label = "2001"),
+                           rast(lc_2011) %>% mutate(label = "2011")) %>% 
+              na.omit %>% filter(value > 0), 
+              aes(x,y,fill=as.factor(value))) +
+  facet_wrap(~label) +
+  scale_fill_viridis(discrete=TRUE, direction=-1,name ="") +
+  labs(title = "Land Cover, 2001 & 2011") +
+  mapTheme() + theme(legend.position = "none")
+```
+```{r reclasslc11}
+developed11 <- lc_2011 == 21 | lc_2011 == 22 | lc_2011 == 23 | lc_2011 == 24
+forest11 <- lc_2011 == 41 | lc_2011 == 42 | lc_2011 == 43 
+farm11 <- lc_2011 == 81 | lc_2011 == 82 
+wetlands11 <- lc_2011 == 90 | lc_2011 == 95 
+otherUndeveloped11 <- lc_2011 == 52 | lc_2011 == 71 | lc_2011 == 31 
+water11 <- lc_2011 == 11
+
+names(developed11) <- "developed11"
+names(forest11) <- "forest11"
+names(farm11) <- "farm11"
+names(wetlands11) <- "wetlands11"
+names(otherUndeveloped11) <- "otherUndeveloped11"
+names(water11) <- "water11"
+```
+```{r }
+layer_list_11 <- list(developed11, wetlands11, forest11, farm11, otherUndeveloped11, water11)
+names(layer_list_11) <- c("developed_2011", "wetlands_2011", "forest_2011", 
+                       "farm_2011", "otherUndeveloped_2011", "water_2011")
+
+fish_extract <- function(fishnet, layers) {
+  extract_list <- exactextractr::exact_extract(layers, fishnet, fun = "mode")
+  return(extract_list)
+}
+
+
+lc_2011_extracts <- lapply(layer_list_11, fish_extract, fishnet = MSA_fishnet)
+lc_2011_extracts <- data.frame(do.call(cbind, args = lc_2011_extracts))
+MSA_fishnet11 <- cbind(data.frame(MSA_fishnet), lc_2011_extracts)
+
+if ( any("pop_2000.x" == names(MSA_fishnet11))) {
+  MSA_fishnet11 <- 
+    MSA_fishnet11 %>%
+    mutate(pop_2000 = pop_2000.x,
+         pop_2010 = pop_2010.x,
+         pop_Change = pop_Change.x)
+} 
+
+lc_2011_lcvar <-
+  MSA_fishnet11 %>%
+  gather(var,value,developed_2011:water_2011) %>%
+  dplyr::select(var,value,geometry) %>%
+  st_as_sf()
+
+lc_2011_lcvar$var <- as.factor(str_sub(lc_2011_lcvar$var,1,-6))
+```
+```{r lc type plot2, include=T}
+# Plot
+ggplot()+
+  geom_sf(data=lc_2011_lcvar, aes(fill=as.factor(value)),color='transparent')+
+  facet_wrap(~var)+
+  scale_fill_viridis(discrete=TRUE, labels=c("Other","Land Cover"),name ="")+
+    labs(title = "Land cover types, 2011",
+         subtitle = "As fishnet centroids") +
+   mapTheme()
+```
+```{r sensitive land, include=T}
+dat2 <- left_join(MSA_fishnet01, MSA_fishnet11, by="geometry")
+
+dat2 <-
+  dat2 %>%
+   mutate(sensitive_lost11 = ifelse(forest_2001 == 1 & forest_2011 == 0 |
+                                    wetlands_2001 == 1 & wetlands_2011 == 0,1,0)) # this includes lands that are not developed at all (farm)
+                      
+ggplot() +
+  geom_point(data=dat2, aes(x=xyC(dat2)[,1], y=xyC(dat2)[,2], colour=as.factor(sensitive_lost11))) +
+  scale_colour_manual(values = palette2,
+                      labels=c("No Change","Sensitive Lost"),
+                      name = "") +
+  labs(title = "Sensitive lands lost: 2001 - 2011",
+       subtitle = "As fishnet centroids") +
+  mapTheme()
+```
+
+```{r land fragment, include=T}
+sensitiveRegions <- 
+  raster::clump(wetlands11 + forest11) %>%
+  rasterToPolygons() %>%
+  st_as_sf() %>%
+  group_by(clumps) %>% summarize() %>%
+    mutate(Acres = as.numeric(st_area(.) * 0.0000229568)) %>%
+    filter(Acres > 3954)  %>%
+  dplyr::select() %>%
+  rasterize(.,emptyRaster) 
+sensitiveRegions[sensitiveRegions > 0] <- 1  
+names(sensitiveRegions) <- "sensitiveRegions"
+
+dat2 <-
+  aggregateRaster(c(sensitiveRegions), dat2) %>%
+  dplyr::select(sensitiveRegions) %>%
+  st_set_geometry(NULL) %>%
+  bind_cols(.,dat2) %>%
+  st_sf()
+
+ggplot() +
+  geom_point(data=dat2, aes(x=xyC(dat2)[,1], y=xyC(dat2)[,2], colour=as.factor(sensitiveRegions))) +
+  scale_colour_manual(values = palette2,
+                      labels=c("Other","Sensitive Regions"),
+                      name="") +
+  labs(title = "Sensitive regions",
+       subtitle = "Continous areas of either wetlands or forests\ngreater than 1 acre") +
+  mapTheme()
+```
+
+
+## Supply-side Change
+```{r supply1}
+county_specific_metrics <- 
+  dat2 %>%
+  #predict development demand from our model
+  mutate(Development_Demand = predict(Model6, dat2, type="response")) %>% #change name of variable!
+  #get a count count of grid cells by county which we can use to calculate rates below
+  left_join(st_set_geometry(dat, NULL) %>% group_by(NAME) %>% summarize(count = n()), by = character()) %>%
+  #calculate summary statistics by county
+  group_by(NAME) %>%
+  summarize(Total_Farmland = sum(farm_2011) / max(count),
+            Total_Forest = sum(forest_2011) / max(count),
+            Total_Wetlands = sum(wetlands_2011) / max(count),
+            Total_Undeveloped = sum(otherUndeveloped_2011) / max(count),
+            Sensitive_Land_Lost = sum(sensitive_lost11) / max(count),
+            Sensitive_Regions = sum(sensitiveRegions) / max(count),
+            Mean_Development_Demand = mean(Development_Demand)) %>%
+  #get population data by county
+  left_join(countyPopulation_2021 %>% 
+            mutate(Population_Change = county_projection_2021 - county_population_2011,
+                   Population_Change_Rate = Population_Change / county_projection_2021) %>%
+            dplyr::select(NAME,Population_Change_Rate))
+```
+
+```{r supply2, include=T}
+county_specific_metrics %>%
+  gather(Variable, Value, -NAME, -geometry) %>%
+  mutate(Variable = factor(Variable, levels=c("Population_Change_Rate","Mean_Development_Demand",
+                                              "Total_Farmland","Total_Undeveloped","Total_Forest",
+                                              "Total_Wetlands","Sensitive_Land_Lost","Sensitive_Regions",
+                                              ordered = TRUE))) %>%
+  mutate(Planning_Designation = case_when(
+    Variable == "Population_Change_Rate" | Variable == "Mean_Development_Demand" ~ "Demand-Side",
+    Variable == "Total_Farmland" | Variable == "Total_Undeveloped"               ~ "Suitable",
+    TRUE                                                                         ~ "Not Suitable")) %>%
+  ggplot(aes(x=Variable, y=Value, fill=Planning_Designation)) +
+    geom_bar(stat="identity", position=position_dodge(), colour="black") +
+    facet_wrap(~NAME, ncol=5) +
+    coord_flip() +
+    scale_y_continuous(breaks = seq(.25, 1, by = .25)) +
+    geom_vline(xintercept = 2.5) + geom_vline(xintercept = 4.5) +
+    scale_fill_manual(values=c("black","red","darkgreen")) +
+    labs(title= "County Specific Allocation Metrics", subtitle= "As rates", x="Indicator", y="Rate") +
+    plotTheme() + theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position="bottom")
+```
+
+# Allocation
+```{r allocation, include=T}
+Allegheny <-
+  dat2 %>%
+    mutate(Development_Demand = predict(Model6, dat2, type="response")) %>%
+    left_join(st_set_geometry(dat, NULL) %>% group_by(NAME) %>% summarize(count = n()), by = character()) %>%
+    #calculate summary statistics by county
+    filter(NAME == "Allegheny") 
+
+Allegheny_landUse <- rbind(
+  filter(Allegheny, forest_2011 == 1 | wetlands_2011 == 1 ) %>%
+  dplyr::select() %>% mutate(Land_Use = "Not Suitable"),
+  filter(Allegheny, developed_2011 == 1) %>%
+  dplyr::select() %>% mutate(Land_Use = "Developed"))
+
+grid.arrange(
+ggplot() +
+  geom_sf(data=Allegheny, aes(fill=factor(ntile(Development_Demand,5))), colour=NA) +
+  geom_point(data=Allegheny_landUse, aes(x=xyC(Allegheny_landUse)[,1], 
+                                        y=xyC(Allegheny_landUse)[,2], colour=Land_Use),
+                                        shape = 15, size = 2) +
+  geom_sf(data=st_intersection(PittsburghHighways,filter(Pittsburgh_MSA, NAME=="Allegheny")), size=2) +
+  scale_fill_manual(values = palette5, name="Development\nDemand",
+                    labels=substr(quintileBreaks(Allegheny,"Development_Demand"),1,5)) +
+  scale_colour_manual(values = c("black","red")) + 
+  labs(title = "Development Potential, 2021: Allegheny") + mapTheme() +
+  guides(fill = guide_legend(order = 1), colour = guide_legend(order = 2)),
+
+ggplot() +
+  geom_sf(data=Allegheny, aes(fill=factor(ntile(pop_Change,5))), colour=NA) +
+  geom_point(data=Allegheny_landUse, aes(x=xyC(Allegheny_landUse)[,1], 
+                                        y=xyC(Allegheny_landUse)[,2], colour=Land_Use),
+                                        shape = 15, size = 2) +
+  geom_sf(data=st_intersection(PittsburghHighways,filter(Pittsburgh_MSA, NAME=="Allegheny")), size=2) +
+  scale_fill_manual(values = palette5, name="Population\nChange",
+                    labels=substr(quintileBreaks(Allegheny,"pop_Change"),1,5)) +
+  scale_colour_manual(values = c("black","red")) + 
+  labs(title = "Projected Population, 2021: Allegheny") + mapTheme() +
+  guides(fill = guide_legend(order = 1), colour = guide_legend(order = 2)), ncol=2)
+```
+
+
+# Appendices {.tabset .tabset-fade .tabset-pills}
+## Preparation
+```{r prep, echo=T, include=T, eval=F}
+library(tidyverse)
+library(sf)
+library(raster)
+library(knitr)
+library(formattable)
+library(tidycensus)
+library(tigris)
+options(tigris_class = "sf")
+options(tigris_use_cache = TRUE)
+library(FNN)
+library(QuantPsyc)
+library(caret)
+library(yardstick)
+library(pscl)
+library(plotROC) 
+library(ggrepel)
+library(pROC)
+library(grid)
+library(gridExtra)
+library(viridis)
+library(exactextractr)
+library(stringr)
+library(censusapi)
+library(ROCR)
+
+mapTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle=element_text(face="italic"),
+    plot.caption=element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2)
+  )
+}
+
+plotTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 14,colour = "black"),
+    plot.subtitle = element_text(face="italic"),
+    plot.caption = element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),
+    panel.grid.major = element_line("grey80", size = 0.1),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=2),
+    strip.background = element_rect(fill = "grey80", color = "white"),
+    strip.text = element_text(size=12),
+    axis.title = element_text(size=12),
+    axis.text = element_text(size=10),
+    plot.background = element_blank(),
+    legend.background = element_blank(),
+    legend.title = element_text(colour = "black", face = "italic"),
+    legend.text = element_text(colour = "black", face = "italic"),
+    strip.text.x = element_text(size = 14)
+  )
+}
+
+palette2 <- c("#41b6c4","#253494")
+palette4 <- c("#a1dab4","#41b6c4","#2c7fb8","#253494")
+palette5 <- c("#ffffcc","#a1dab4","#41b6c4","#2c7fb8","#253494")
+palette10 <- c("#f7fcf0","#e0f3db","#ccebc5","#a8ddb5","#7bccc4",
+               "#4eb3d3","#2b8cbe","#0868ac","#084081","#f7fcf0")
+```
+```{r function prep, echo=T, include=T, eval=F}
+quintileBreaks <- function(df,variable) {
+    as.character(quantile(df[[variable]],
+                          c(.01,.2,.4,.6,.8),na.rm=T))
+}
+
+#This function can be used to convert a polygon sf to centroids xy coords.
+xyC <- function(aPolygonSF) {
+  as.data.frame(
+    cbind(x=st_coordinates(st_centroid(aPolygonSF))[,1],
+          y=st_coordinates(st_centroid(aPolygonSF))[,2]))
+} 
+
+#this function convert a raster to a data frame so it can be plotted in ggplot
+rast <- function(inRaster) {
+  data.frame(
+    xyFromCell(inRaster, 1:ncell(inRaster)), 
+    value = getValues(inRaster)) }
+
+nn_function <- function(measureFrom,measureTo,k) {
+  #convert the sf layers to matrices
+  measureFrom_Matrix <-
+    as.matrix(measureFrom)
+  measureTo_Matrix <-
+    as.matrix(measureTo)
+  nn <-   
+    get.knnx(measureTo, measureFrom, k)$nn.dist
+    output <-
+    as.data.frame(nn) %>%
+    rownames_to_column(var = "thisPoint") %>%
+    gather(points, point_distance, V1:ncol(.)) %>%
+    arrange(as.numeric(thisPoint)) %>%
+    group_by(thisPoint) %>%
+    summarize(pointDistance = mean(point_distance)) %>%
+    arrange(as.numeric(thisPoint)) %>% 
+    dplyr::select(-thisPoint) %>%
+    pull()
+  
+  return(output)  
+}
+```
+## Land Use Change Data and Create Fishnet
+```{r load and manipulate lc data, echo=T, include=T, eval=F}
+# Xinyi's
+# Pittsburgh_MSA <-
+#   st_read("Pittsburgh_MSA/Pittsburgh_MSA.shp") %>%
+#   st_transform(102741) #102003
+# 
+# Pittsburgh_MSA_boundary <- Pittsburgh_MSA %>%
+#   group_by(STATEFP) %>%
+#   summarise() %>%
+#   st_transform(102741)
+
+# Gillian's
+Pittsburgh_MSA <-
+  st_read("Pittsburgh_MSA/Pittsburgh_MSA.shp") %>%
+  st_transform("ESRI:102741") #102003
+
+Pittsburgh_MSA_boundary <- Pittsburgh_MSA %>%
+  group_by(STATEFP) %>%
+  summarise() %>%
+  st_transform("ESRI:102741")
+
+MSA_fishnet <- 
+  st_make_grid(Pittsburgh_MSA_boundary, 3000) %>%
+  st_sf()
+
+MSA_fishnet <- 
+  MSA_fishnet[Pittsburgh_MSA_boundary,]
+
+ggplot()+
+  labs(title="Pittsburgh MSA Boundary and Counties",
+       subtitle="Illustration of Fishnet, 3000 foot resolution")+
+  geom_sf(data=Pittsburgh_MSA, aes(fill=as.factor(NAME)))+
+  geom_sf(data=MSA_fishnet, fill=NA, color="gray", alpha=0.5) +
+  geom_sf(data=Pittsburgh_MSA, fill=NA, size=1.5, aes(colour=as.factor(NAME)))+
+  scale_color_viridis(discrete = T,
+                     name ="County")+
+  scale_fill_viridis(discrete = T,
+                     name ="County")+
+  mapTheme()
+
+lc_2001 <- raster("msa_2001lc.tif")
+lc_2001 <-projectRaster(lc_2001,crs=crs(Pittsburgh_MSA))
+
+lc_2011 <- raster ("msa_2011lc.tif")
+lc_2011 <- projectRaster(lc_2011,crs=crs(Pittsburgh_MSA) )
+
+# aggregate
+lc_2001 <- raster::aggregate(lc_2001, fact = 30, fun = modal)
+lc_2011 <- raster::aggregate(lc_2011, fact = 30, fun = modal)
+
+# calculate
+lc_change <- (lc_2001 != lc_2011) * lc_2011
+
+reclassMatrix <- 
+  matrix(c(
+    0,12,0,
+    12,24,1,
+    24,Inf,0),
+    ncol=3, byrow=T)
+lc_change_reclass <- reclassify(lc_change, reclassMatrix)
+lc_change_reclass[lc_change_reclass < 1] <- 0
+names(lc_change_reclass) <- "lc_change_reclass"
+
+lc_change_extract <- data.frame(exact_extract(lc_change_reclass, MSA_fishnet, fun = "mode"))
+names(lc_change_extract) <- "developed_2011"
+
+MSA_fishnet <- cbind(data.frame(MSA_fishnet),lc_change_extract)
+
+# Xinyi's
+# MSA_fishnet <- 
+#   MSA_fishnet %>%
+#   st_as_sf(.) %>%
+#   st_transform(102741)
+
+MSA_fishnet <- 
+  MSA_fishnet %>%
+  st_as_sf(.) %>%
+  st_transform("ESRI:102741")
+
+# Plot
+ggplot() +
+   geom_sf(data=MSA_fishnet,aes(fill=as.factor(developed_2011)),color='transparent')+
+   scale_fill_viridis(discrete=TRUE, name ="Land Cover\nChange",labels=c("No Change","New Development")) +
+  labs(title="Pittsburgh MSA Development Land Use Change (2001 - 2011)") +
+  mapTheme()
+
+ggplot() +
+  geom_sf(data=Pittsburgh_MSA_boundary) +
+  geom_raster(data=rast(lc_2001) %>% na.omit %>% filter(value > 0), 
+              aes(x,y,fill=as.factor(round(value,0)))) +
+  scale_fill_viridis(discrete=TRUE,direction=-1, name ="") +
+  labs(title = "Pittsburgh MSA Land Cover, 2001") +
+  mapTheme()
+
+developed <- lc_2001 == 21 | lc_2001 == 22 | lc_2001 == 23 | lc_2001 == 24
+forest <- lc_2001 == 41 | lc_2001 == 42 | lc_2001 == 43 
+farm <- lc_2001 == 81 | lc_2001 == 82 
+wetlands <- lc_2001 == 90 | lc_2001 == 95 
+otherUndeveloped <- lc_2001 == 52 | lc_2001 == 71 | lc_2001 == 31 
+water <- lc_2001 == 11
+names(developed) <- "developed"
+names(forest) <- "forest"
+names(farm) <- "farm"
+names(wetlands) <- "wetlands"
+names(otherUndeveloped) <- "otherUndeveloped"
+names(water) <- "water"
+
+layer_list <- list(developed, wetlands, forest, farm, otherUndeveloped, water)
+names(layer_list) <- c("developed_2001", "wetlands_2001", "forest_2001", 
+                       "farm_2001", "otherUndeveloped_2001", "water_2001")
+
+fish_extract <- function(fishnet, layers) {
+  
+  extract_list <- exact_extract(layers, fishnet, fun = "mode")
+  
+  return(extract_list)
+  
+}
+
+
+lc_2001_extracts <- lapply(layer_list, fish_extract, fishnet = MSA_fishnet)
+lc_2001_extracts <- data.frame(do.call(cbind, args = lc_2001_extracts))
+MSA_fishnet <- cbind(data.frame(MSA_fishnet), lc_2001_extracts)
+
+# Xinyi's
+# MSA_fishnet <- 
+#   MSA_fishnet %>%
+#   st_as_sf(.) %>%
+#   st_transform(102741)
+
+MSA_fishnet <- 
+  MSA_fishnet %>%
+  st_as_sf(.) %>%
+  st_transform("ESRI:102741")
+
+lc_2001_lcvar <-
+  MSA_fishnet %>%
+  gather(var,value,developed_2001:water_2001) %>%
+  dplyr::select(var,value,geometry) 
+
+lc_2001_lcvar$var <- as.factor(str_sub(lc_2001_lcvar$var,1,-6))
+
+# Plot
+ggplot()+
+  geom_sf(data=lc_2001_lcvar,aes(fill=as.factor(value)),color='transparent')+
+  facet_wrap(~var)+
+  scale_fill_viridis(discrete=TRUE, labels=c("Other","Land Cover"),name ="")+
+    labs(title = "Land cover types, 2001",
+         subtitle = "As fishnet centroids") +
+   mapTheme()
+```
+## Predicting Features Data
+```{r feature data, echo=T, include=T, eval=F}
+# Population
+MSAPop10 <-
+  get_decennial(geography = "tract",variables = "P001001",year=2010,
+                state=42,county=c("Allegheny County","Armstrong County","Beaver County","Butler County","Fayette County",
+                                  "Washington County","Westmoreland County"),geometry=TRUE) %>%
+  rename(pop_2010 = value) %>%
+  st_transform(st_crs(MSA_fishnet))
+
+Sys.setenv(CENSUS_KEY = "2c3e9f9d2d65abab5f7b81fe418054415d363a43")
+MSAPop00 <-getCensus(name = "dec/sf1", 
+                  vintage = 2000, 
+                  vars = c("NAME","P001001"),
+                  region = "tract:*", 
+                  regionin = "state:42+county:003,005,007,019,051,125,129")
+MSAPop00$label <- paste0(MSAPop00$county,"0",MSAPop00$tract)
+for (i in 1:721){
+  if(nchar(MSAPop00[i,]$label)!=10){
+    MSAPop00[i,]$label <-paste0(MSAPop00[i,]$label,"00")
+  }
+  
+}
+
+# Xinyi's 
+# MSAtracts00 <- st_read("MSAtracts/MSAtracts.shp") %>%
+#  st_transform(102741)
+
+# Gillian's
+MSAtracts00 <- st_read("MSAtracts/MSAtracts.shp") %>%
+  st_transform("ESRI:102741")
+
+MSAtracts00$tract <-substr(MSAtracts00$GISJOIN2 ,4,13)
+MSAtracts00$tract <- as.character(MSAtracts00$tract)
+
+MSAPop00 <- left_join(MSAtracts00, MSAPop00,by=c("tract"="label"))
+MSAPop00 <- MSAPop00 %>%
+  dplyr::select(GISJOIN2,NAME,P001001,geometry) %>%
+  rename(GEOID = GISJOIN2,pop_2000 = P001001)
+
+# Plot
+grid.arrange(
+ggplot() +
+  geom_sf(data = MSAPop00, aes(fill=factor(ntile(pop_2000,5))), colour=NA) +
+  scale_fill_manual(values = palette5,
+                    labels=quintileBreaks(MSAPop00,"pop_2000"),
+                   name="Quintile\nBreaks") +
+  labs(title="Population, Pittsburgh MSA: 2000") +
+  mapTheme(),
+
+ggplot() +
+  geom_sf(data = MSAPop10, aes(fill=factor(ntile(pop_2010,5))), colour=NA) +
+  scale_fill_manual(values = palette5,
+                    labels=quintileBreaks(MSAPop10,"pop_2010"),
+                   name="Quintile\nBreaks") +
+  labs(title="Population, Pittsburgh MSA: 2010") +
+  mapTheme(), ncol=2)
+
+# To fishnet
+MSA_fishnet <-
+  MSA_fishnet %>%
+  rownames_to_column("fishnetID") %>%
+  mutate(fishnetID = as.numeric(fishnetID)) 
+
+fishnetPop00 <-
+  st_interpolate_aw(MSAPop00["pop_2000"],MSA_fishnet,extensive=TRUE) %>%
+  as.data.frame(.) %>%
+  left_join(MSA_fishnet,.,by="geometry") %>%
+  mutate(pop_2000=replace_na(pop_2000,0)) %>%
+  dplyr::select(fishnetID,pop_2000)
+
+fishnetPop10 <-
+  st_interpolate_aw(MSAPop10["pop_2010"],MSA_fishnet,extensive=TRUE) %>%
+  as.data.frame(.) %>%
+  left_join(MSA_fishnet,.,by="geometry") %>%
+  mutate(pop_2010=replace_na(pop_2010,0)) %>%
+  dplyr::select(pop_2010,fishnetID)
+
+fishnetPop <- 
+  cbind(fishnetPop00,fishnetPop10) %>%
+  dplyr::select(pop_2000,pop_2010,fishnetID) %>%
+  mutate(pop_Change = pop_2010 - pop_2000) %>%
+  st_drop_geometry(.)
+
+
+MSA_fishnet <- left_join(MSA_fishnet,data.frame(fishnetPop),by="fishnetID")
+
+# Highway
+PittsburghHighways <-
+  st_read("MSAHighways/MSAHighways.shp") %>%
+  st_transform(st_crs(Pittsburgh_MSA)) %>%
+  st_intersection(Pittsburgh_MSA_boundary)
+
+PittsburghHighways <- 
+  PittsburghHighways %>%
+  dplyr::select(CTY_CODE, DISTRICT_N,MAINT_FUNC,geometry)
+
+# Plot
+ggplot() +
+  geom_sf(data=MSA_fishnet,aes(fill=as.factor(developed_2011)),color='transparent') +
+  geom_sf(data=PittsburghHighways,color='white') +
+  scale_fill_viridis(discrete=TRUE, name ="Land Cover\nChange",labels=c("No Change","New Development")) +
+  labs(title = "Pittsburgh MSA New Development and Highways") +
+  mapTheme()
+
+# Distance to highway
+
+emptyRaster <- lc_change
+emptyRaster[] <- NA
+
+highway_raster <- 
+  as(PittsburghHighways,'Spatial') %>%
+  rasterize(.,emptyRaster)
+
+# writeRaster(highway_raster,"highway_raster.tif")
+
+highway_raster_distance <- distance(highway_raster)
+names(highway_raster_distance) <- "distance_highways"
+
+highwayPoints <-
+  rasterToPoints(highway_raster_distance) %>%
+  as.data.frame() %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(MSA_fishnet))
+
+highwayPoints_fishnet <- 
+  aggregate(highwayPoints, MSA_fishnet, mean) %>%
+  mutate(distance_highways = ifelse(is.na(distance_highways),0,distance_highways)) %>%
+  rownames_to_column("fishnetID") %>%
+  mutate(fishnetID = as.numeric(fishnetID)) 
+  
+
+highwayPoints_fishnet <-highwayPoints_fishnet %>%
+  st_drop_geometry(.)
+
+MSA_fishnet <- left_join(MSA_fishnet,highwayPoints_fishnet,by="fishnetID")
+
+# Plot dist to highway
+ggplot() +
+  geom_sf(data=Pittsburgh_MSA_boundary) +
+  geom_point(data=MSA_fishnet , aes(x=xyC(MSA_fishnet )[,1], 
+                                             y=xyC(MSA_fishnet)[,2], 
+                 colour=factor(ntile(distance_highways,5))),size=1.5) +
+  scale_colour_manual(values = palette5,
+                      labels=substr(quintileBreaks(MSA_fishnet ,"distance_highways"),1,8),
+                      name="Quintile\nBreaks") +
+  geom_sf(data=PittsburghHighways, colour = "red") +
+  labs(title = "Distance to Highways",
+       subtitle = "As fishnet centroids; Highways visualized in red") +
+  mapTheme()
+
+# Spatial lag of devlopment
+MSA_fishnet$lagDevelopment <-
+  nn_function(xyC(MSA_fishnet),
+              xyC(filter(MSA_fishnet,developed_2001==1)),
+              2)
+
+# Plot nn functions
+ggplot() +
+  geom_sf(data=Pittsburgh_MSA_boundary) +
+  geom_point(data=MSA_fishnet, 
+             aes(x=xyC(MSA_fishnet)[,1], y=xyC(MSA_fishnet)[,2], 
+                 colour=factor(ntile(lagDevelopment,5))), size=1.5) +
+  scale_colour_manual(values = palette5,
+                     labels=substr(quintileBreaks(MSA_fishnet,"lagDevelopment"),1,7),
+                     name="Quintile\nBreaks") +
+  labs(title = "Spatial lag to 2001 development",
+       subtitle = "As fishnet centroids") +
+  mapTheme()
+```
+```{r exploratory, echo=T, include=T, eval=F}
+# Final dataset
+colnames(MSA_fishnet)[which (names(MSA_fishnet)=="developed_2011")] <-"lc_change"
+
+dat <-
+  MSA_fishnet %>%
+  dplyr::select(lc_change,developed_2001,wetlands_2001,forest_2001,farm_2001,otherUndeveloped_2001,water_2001,pop_2000,pop_2010,pop_Change,
+                distance_highways, lagDevelopment)  %>%
+  st_join(Pittsburgh_MSA) %>%
+  mutate(developed11 = ifelse(lc_change==1 & developed_2001 == 1,0,developed_2001)) %>%
+  filter(water_2001 == 0)
+
+dat$lc_change <- as.factor(dat$lc_change)
+
+dat %>%
+  dplyr::select(distance_highways,lagDevelopment,lc_change) %>%
+  gather(Variable, Value, -lc_change, -geometry) %>%
+  ggplot(., aes(lc_change, Value, fill=lc_change)) + 
+    geom_bar(position = "dodge", stat = "summary", fun = "mean") +
+    facet_wrap(~Variable) +
+    scale_fill_manual(values = palette2,
+                      labels=c("No Change","New Development"),
+                      name="") +
+    labs(title="New development as a function of the countinuous variables") +
+    plotTheme() 
+
+grid.arrange(
+dat %>%
+  dplyr::select(pop_2000,pop_2010,pop_Change,lc_change) %>%
+  mutate(pop_Change=pop_Change) %>%
+  gather(Variable, Value, -lc_change, -geometry) %>%
+  ggplot(., aes(lc_change, Value, fill=lc_change)) + 
+    geom_bar(position = "dodge", stat = "summary", fun = "mean") +
+    facet_wrap(~Variable) +
+    scale_fill_manual(values = palette2,
+                      labels=c("No Change","New Development"),
+                      name="") +
+    labs(title="New development as a function of factor variables",
+         subtitle = "Original Population Change") +
+    plotTheme(),
+
+dat %>%
+  dplyr::select(pop_2000,pop_2010,pop_Change,lc_change) %>%
+  mutate(pop_Change=pop_Change*10) %>%
+  gather(Variable, Value, -lc_change, -geometry) %>%
+  ggplot(., aes(lc_change, Value, fill=lc_change)) + 
+    geom_bar(position = "dodge", stat = "summary", fun = "mean") +
+    facet_wrap(~Variable) +
+    scale_fill_manual(values = palette2,
+                      labels=c("No Change","New Development"),
+                      name="") +
+    labs(title="New development as a function of factor variables",
+         subtitle = "Multiply Population Change by 10") +
+    plotTheme(),ncol=1)
+
+table <-dat %>%
+  dplyr::select(lc_change:otherUndeveloped_2001) %>%
+  gather(Land_Cover_Type, Value, -lc_change, -geometry) %>%
+   st_set_geometry(NULL) %>%
+     group_by(lc_change, Land_Cover_Type) %>%
+     summarize(n = sum(as.numeric(Value))) %>%
+     ungroup() %>%
+    mutate(Conversion_Rate = paste0(round(100 * n/sum(n), 2), "%")) %>%
+    filter(lc_change == 1) %>%
+  dplyr::select(Land_Cover_Type,Conversion_Rate) 
+table <- data.frame(table)
+table$Land_Cover_Type[1]<-"Developed"
+table$Land_Cover_Type[2]<-"Farm"
+table$Land_Cover_Type[3]<-"Forest"
+table$Land_Cover_Type[4]<-"Other Undeveloped"
+formattable(table,
+            align=c("l","l"))
+```

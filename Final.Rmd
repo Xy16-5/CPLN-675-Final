@@ -48,22 +48,7 @@ library(exactextractr)
 library(stringr)
 library(censusapi)
 library(ROCR)
-
-mapTheme <- function(base_size = 12) {
-  theme(
-    text = element_text( color = "black"),
-    plot.title = element_text(size = 14,colour = "black"),
-    plot.subtitle=element_text(face="italic"),
-    plot.caption=element_text(hjust=0),
-    axis.ticks = element_blank(),
-    panel.background = element_blank(),axis.title = element_blank(),
-    axis.text = element_blank(),
-    axis.title.x = element_blank(),
-    axis.title.y = element_blank(),
-    panel.grid.minor = element_blank(),
-    panel.border = element_rect(colour = "black", fill=NA, size=2)
-  )
-}
+library(stargazer)
 
 plotTheme <- function(base_size = 12) {
   theme(
@@ -75,7 +60,7 @@ plotTheme <- function(base_size = 12) {
     panel.background = element_blank(),
     panel.grid.major = element_line("grey80", size = 0.1),
     panel.grid.minor = element_blank(),
-    panel.border = element_rect(colour = "black", fill=NA, size=2),
+    panel.border = element_blank(),
     strip.background = element_rect(fill = "grey80", color = "white"),
     strip.text = element_text(size=12),
     axis.title = element_text(size=12),
@@ -86,6 +71,22 @@ plotTheme <- function(base_size = 12) {
     legend.text = element_text(colour = "black", face = "italic"),
     strip.text.x = element_text(size = 14)
   )
+}
+
+mapTheme <- function(base_size = 12) {
+  theme(
+    text = element_text( color = "black"),
+    plot.title = element_text(size = 16,colour = "black"),
+    plot.subtitle=element_text(face="italic"),
+    plot.caption=element_text(hjust=0),
+    axis.ticks = element_blank(),
+    panel.background = element_blank(),axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    strip.text.x = element_text(size = 14))
 }
 
 palette2 <- c("#41b6c4","#253494")
@@ -238,7 +239,7 @@ ggplot() +
 developed <- lc_2001 == 21 | lc_2001 == 22 | lc_2001 == 23 | lc_2001 == 24
 forest <- lc_2001 == 41 | lc_2001 == 42 | lc_2001 == 43 
 farm <- lc_2001 == 81 | lc_2001 == 82 
-wetlands_2001 <- lc_2001 == 90 | lc_2001 == 95 
+wetlands <- lc_2001 == 90 | lc_2001 == 95 
 otherUndeveloped <- lc_2001 == 52 | lc_2001 == 71 | lc_2001 == 31 
 water <- lc_2001 == 11
 names(developed) <- "developed"
@@ -654,6 +655,9 @@ Model6 <- glm(lc_change ~ wetlands_2001 + forest_2001  + farm_2001 + otherUndeve
               distance_highways, 
               family="binomial"(link="logit"), data = datTrain) 
 ```
+```{r stargazer, results='asis'}
+stargazer(Model1, Model2, Model3, Model4, Model5, Model6, type='html')
+```
 
 ```{r compare models}
 modelList <- paste0("Model", 1:6)
@@ -661,7 +665,7 @@ map_dfc(modelList, function(x)pR2(get(x)))[4,] %>%
   setNames(paste0("Model",1:6)) %>%
   gather(Model,McFadden) %>%
   ggplot(aes(Model,McFadden)) +
-    geom_bar(stat="identity") +
+    geom_bar(stat="identity", fill="#41b6c4") +
     labs(title= "McFadden R-Squared by Model") +
     plotTheme()
 ```
@@ -709,9 +713,13 @@ F.score_table[which.max(F.score_table$F.score),] #0.0149
 
 testSetProbs <- 
   testSetProbs %>% 
-  mutate(predClass_01 = as.factor(ifelse(testSetProbs$probs >= 0.01 ,1,0)),
-         predClass_0149 = as.factor(ifelse(testSetProbs$probs >= 0.0149 ,1,0)),
-         predClass_012 = as.factor(ifelse(testSetProbs$probs >= 0.012 ,1,0))) 
+  mutate(
+        predClass_01 = as.factor(ifelse(testSetProbs$probs >= 0.01 ,1,0)),
+        predClass_015 = as.factor(ifelse(testSetProbs$probs >= 0.015 ,1,0)),
+        predClass_2 = as.factor(ifelse(testSetProbs$probs >= 0.02 ,1,0)),
+        predClass_3 = as.factor(ifelse(testSetProbs$probs >= 0.03 ,1,0))，
+        predClass_5 = as.factor(ifelse(testSetProbs$probs >= 0.05 ,1,0))
+         )
 
 testSetProbs %>%
   dplyr::select(-probs) %>%
@@ -729,9 +737,9 @@ testSetProbs %>%
 predsForMap <-         
   dat %>%
     mutate(probs = predict(Model6, dat, type="response") ,
-           Threshold_1.49_Pct = as.factor(ifelse(probs >= 0.0149 ,1,0)),
-           Threshold_17_Pct =  as.factor(ifelse(probs >= 0.17, 1,0))) %>%
-    dplyr::select(lc_change,Threshold_1.49_Pct,Threshold_17_Pct) %>%
+           Threshold_0.5_Pct = as.factor(ifelse(probs >= 0.005 ,1,0)),
+           Threshold_3_Pct =  as.factor(ifelse(probs >= 0.03, 1,0))) %>%
+    dplyr::select(lc_change,Threshold_0.5_Pct,Threshold_3_Pct) %>%
     gather(Variable,Value, -geometry) %>%
     st_cast("POLYGON")
 
