@@ -11,7 +11,7 @@ output:
     theme: cerulean
 ---
 ```{r setup knitr, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE,message=FALSE,warning=FALSE,include=FALSE)
+knitr::opts_chunk$set(echo = FALSE,message=FALSE,warning=FALSE,include=FALSE,error=T)
 options(scipen=99)
 ```
 ```{r setwd, include=FALSE}
@@ -88,6 +88,7 @@ mapTheme <- function(base_size = 10) {
 
 palette2 <- c("#f8edeb", "#83c5be")
 palette2b <- c("#f8edeb", "#fd9235")
+palette3 <- c("#f8edeb", "#83c5be", "#3b7d76")
 palette4 <- c("#a1dab4","#41b6c4","#2c7fb8","#253494")
 palette5 <- c("#f7f6de","#edeec9","#b8dedc","#83c5be","#42999b")
 palette5b <- c("#42999b","#83c5be","#b8dedc","#edeec9","#f7f6de")
@@ -232,6 +233,7 @@ names(lc_change_reclass) <- "lc_change_reclass"
 lc_change_extract <- data.frame(exact_extract(lc_change_reclass, MSA_fishnet, fun = "mode"))
 names(lc_change_extract) <- "developed_0111"
 
+# First time creating fishnet01
 MSA_fishnet01 <- cbind(data.frame(MSA_fishnet),lc_change_extract)
 
 MSA_fishnet01 <- 
@@ -291,8 +293,8 @@ lc_2001_extracts <- lapply(layer_list, fish_extract, fishnet = MSA_fishnet01)
 lc_2001_extracts <- data.frame(do.call(cbind, args = lc_2001_extracts))
 MSA_fishnet01 <- cbind(data.frame(MSA_fishnet01), lc_2001_extracts)
 
-MSA_fishnet <- 
-  MSA_fishnet %>%
+MSA_fishnet01 <- 
+  MSA_fishnet01 %>%
   st_as_sf(.) %>%
   st_transform("ESRI:102741")
 
@@ -394,13 +396,13 @@ fishnetPop10 <-
   dplyr::select(pop_2010,fishnetID)
 
 fishnetPop <- 
-  left_join(fishnetPop00,fishnetPop10, by="fishnetID") %>%
+  cbind(fishnetPop00,fishnetPop10) %>%
   dplyr::select(pop_2000,pop_2010,fishnetID) %>%
-  mutate(pop_Change = pop_2010 - pop_2000)
+  mutate(pop_Change = pop_2010 - pop_2000) %>%
+  st_drop_geometry()
 
 
-MSA_fishnet01 <- left_join(MSA_fishnet01,data.frame(fishnetPop),by="fishnetID") %>%
-  st_as_sf()
+MSA_fishnet01 <- left_join(MSA_fishnet01,data.frame(fishnetPop),by="fishnetID")
 ```
 
 ```{r pop0010 fishnet plot, include=T}
@@ -552,6 +554,13 @@ dat <-
   filter(water_2001 == 0)
 
 dat$lc_change <- as.factor(dat$lc_change)
+
+if (any( "geometry.x" == colnames(dat))) {
+  dat <- dat %>%
+  dplyr::mutate(geometry = geometry.x) %>%
+  dplyr::select(-geometry.x)
+}
+
 ```
 
 [] All existing comparison plots
@@ -715,12 +724,12 @@ plot(f.perf)
 F.score <-c(f.perf@y.values[[1]])
 cutoff<-c(f.perf@x.values[[1]])
 F.score_table<-data.frame(cbind(F.score,cutoff))
-F.score_table[which.max(F.score_table$F.score),] #0.01;
+F.score_table[which.max(F.score_table$F.score),] #0.002;
 
 testSetProbs <- 
   testSetProbs %>% 
   mutate(
-        predClass_01 = as.factor(ifelse(testSetProbs$probs >= 0.01 ,1,0)),
+        predClass_002 = as.factor(ifelse(testSetProbs$probs >= 0.002 ,1,0)),
         predClass_02 = as.factor(ifelse(testSetProbs$probs >= 0.02 ,1,0)),
         predClass_03 = as.factor(ifelse(testSetProbs$probs >= 0.03 ,1,0)), # V
         predClass_05 = as.factor(ifelse(testSetProbs$probs >= 0.05 ,1,0))
@@ -742,8 +751,8 @@ predsForMap <-
   dat %>%
     mutate(probs = predict(Model6, dat, type="response") ,
            Threshold_1_Pct = as.factor(ifelse(probs >= 0.01 ,1,0)),
-           Threshold_3_Pct =  as.factor(ifelse(probs >= 0.03, 1,0))) %>%
-    dplyr::select(lc_change,Threshold_1_Pct,Threshold_3_Pct) %>%
+           Threshold_2_Pct =  as.factor(ifelse(probs >= 0.02, 1,0))) %>%
+    dplyr::select(lc_change,Threshold_1_Pct,Threshold_2_Pct) %>%
     gather(Variable,Value, -geometry) %>%
     st_cast("POLYGON")
 
@@ -761,11 +770,11 @@ ConfusionMatrix.metrics <-
   dat %>%
     mutate(probs = predict(Model6, dat, type="response") ,
            Threshold_1_Pct = as.factor(ifelse(probs >= 0.01 ,1,0)),
-           Threshold_3_Pct =  as.factor(ifelse(probs >= 0.03, 1,0))) %>%
+           Threshold_2_Pct =  as.factor(ifelse(probs >= 0.02, 1,0))) %>%
     mutate(TrueP_1 = ifelse(lc_change  == 1 & Threshold_1_Pct == 1, 1,0),
            TrueN_1 = ifelse(lc_change  == 0 & Threshold_1_Pct == 0, 1,0),
-           TrueP_3 = ifelse(lc_change  == 1 & Threshold_3_Pct == 1, 1,0),
-           TrueN_3 = ifelse(lc_change  == 0 & Threshold_3_Pct == 0, 1,0)) %>%
+           TrueP_2 = ifelse(lc_change  == 1 & Threshold_2_Pct == 1, 1,0),
+           TrueN_2 = ifelse(lc_change  == 0 & Threshold_2_Pct == 0, 1,0)) %>%
     dplyr::select(., starts_with("True")) %>%
     gather(Variable, Value, -geometry) %>%
     st_cast("POLYGON") 
@@ -859,7 +868,7 @@ countyPopulation_2021 <-
    NAME = 
      c("Fayette","Washington","Westmoreland","Allegheny","Beaver","Armstrong","Butler"),
    county_projection_2021 = 
-     c(129274, 206865, 58002, 1216045, 163929, 64735, 187853))
+     c(129274-1049*2, 206865-153*2, 348899-1560*2, 1216045-1236*2, 163929-653*2, 64735-617*2, 187853+215*2))
   )
 
 # Data source: 2019 estimate from upitt https://www.ucsur.pitt.edu/perspectives.php?b=20221115818670
@@ -992,7 +1001,7 @@ dat_infill <-
            pop_Change = round(pop_2021.infill - pop_2010),2) %>%
     dplyr::select(-county_projection_2021, -county_population_2011, 
                   -proportion_of_county_pop, -pop_2021.infill) %>%
-  #predict for 2021; only changed pop and lag
+  #predict for 2021;
     mutate(predict_2021.infill = predict(Model6,. , type="response"))
 
 dat_infill %>%
@@ -1126,27 +1135,164 @@ county_specific_metrics %>%
 ```
 
 ## Supply-side Change
+[] We tried building a model with 2000-2010 data to project population change with distance to highway, but the result coefficient is insignificant and positive, which suggests that the closer to highway, the smaller the population growth. Since it conflicts with normal assumption, for the purpose of this project, we assume that a 1% increase in transportation infrastructure stock will lead to 0.2% increase in population^[Duranton, G., & Turner, M. A. (2012). Urban Growth and Transportation.The Review of Economic Studies, 79 (4), 1407-1440.
+http://dx.doi.org/10.1093/restud/rds010].
 
+```{r pop and highway model}
+popProject <- glm(pop_Change ~ wetlands_2001 + forest_2001  + farm_2001 + otherUndeveloped_2001 + lagDevelopment + distance_highways,
+  data = dat)
+
+```
+
+```{r pop and high way, include=T, result='asis'}
+stargazer(popProject, type='html')
+```
+
+[] project new pop
+1% (0.01) increase in road = 0.2% increase in pop
+1.22% (1.22) increase in road = (1.22*0.002) increase in pop
+
+```{r pop with highway}
+countyPopulation_2021_withHighway <- 
+  countyPopulation_2021 %>%
+  mutate(new_county_projection_2021 = ifelse( NAME == "Allegheny" | NAME == "Washington", county_projection_2021 * (1.22*0.002 + 1), county_projection_2021))
+
+# Data source: 2019 estimate from upitt https://www.ucsur.pitt.edu/perspectives.php?b=20221115818670
+```
+
+```{r pop proj with highway, include=T}
+countyPopulation_2021_withHighway %>%
+  gather(Variable,Value, -NAME) %>%
+  ggplot(aes(reorder(NAME,-Value),Value)) +
+  geom_bar(aes(fill=Variable), stat = "identity", position=position_dodge()) +
+  scale_fill_manual(values = palette3,
+                    labels=c("2011","2021","2021 with highway"),
+                    name="Population") +
+  labs(title="Population Change by county: 2011 - 2021",
+       x="County", y="Population") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  plotTheme()
+```
+```{r supply demand}
+# Update distance to highway
+newHighways <-
+  st_read("New_Highways/New_Highways.shp") %>%
+  st_transform(st_crs(Pittsburgh_MSA))
+
+updatedHighways <-
+  st_read("Updated_HWay/Updated_HWay.shp") %>%
+  st_transform(st_crs(Pittsburgh_MSA))
+
+updated_highway_raster <- 
+  as(updatedHighways,'Spatial') %>%
+  rasterize(.,emptyRaster)
+
+updated_highway_raster_distance <- distance(updated_highway_raster)
+names(updated_highway_raster_distance) <- "updated_distance_highways"
+
+updated_highwayPoints <-
+  rasterToPoints(updated_highway_raster_distance) %>%
+  as.data.frame() %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(MSA_fishnet))
+
+updated_highwayPoints_fishnet <- 
+  aggregate(updated_highwayPoints, MSA_fishnet, mean) %>%
+  mutate(updated_distance_highways = ifelse(is.na(updated_distance_highways), 0, updated_distance_highways)) %>%
+  rownames_to_column("fishnetID") %>%
+  mutate(fishnetID = as.numeric(fishnetID)) 
+
+# change dist to highway in 11 dat
+dat11_withHighway <- 
+  dat11 %>%
+  st_join(., updated_highwayPoints_fishnet) %>%
+  dplyr::mutate(distance_highways = updated_distance_highways)
+
+dat_infill_withHighway <-
+  dat11_withHighway %>%
+  #calculate population change
+    left_join(countyPopulation_2021_withHighway) %>%
+    mutate(proportion_of_county_pop = pop_2010 / county_population_2011,
+           pop_2021.infill = proportion_of_county_pop * new_county_projection_2021,
+           pop_Change = round(pop_2021.infill - pop_2010),2) %>%
+    dplyr::select(-county_projection_2021, -county_population_2011, 
+                  -proportion_of_county_pop, -pop_2021.infill) %>%
+  #predict for 2021; only changed pop and lag
+    mutate(predict_2021.infill = predict(Model6,. , type="response")) # calculate new dist to pop
+```
+
+```{r supply pop plot, include=T}
+grid.arrange(
+  dat_infill_withHighway %>%
+    ggplot() +  
+    geom_point(aes(x=xyC(dat_infill_withHighway)[,1], y=xyC(dat_infill_withHighway)[,2], colour = factor(ntile(pop_Change,5)))) +
+    scale_colour_manual(values = palette5,
+                      labels=substr(quintileBreaks(dat_infill_withHighway, "pop_Change"),1,8),
+                      name="Population\nChange\nin Quintile\nBreaks") +
+    geom_sf(data=Pittsburgh_MSA, fill=NA, colour="black", size=1.5) +
+    geom_sf(data=PittsburghHighways, color='#6c757d', size=1, alpha=0.8) +
+    geom_sf(data=newHighways, fill=NA, colour="#e5989b", size=1) +
+    labs(title= "Population Change in 2021\nwith Proposed Highway",
+         subtitle="New highway shown in pink") +
+    mapTheme(),
+  
+  dat_infill %>%
+    ggplot() +  
+    geom_point(aes(x=xyC(dat_infill)[,1], y=xyC(dat_infill)[,2], colour = factor(ntile(pop_Change,5)))) +
+    scale_colour_manual(values = palette5,
+                      labels=substr(quintileBreaks(dat_infill, "pop_Change"),1,8),
+                      name="Population\nChange\nin Quintile\nBreaks") +
+    geom_sf(data=Pittsburgh_MSA, fill=NA, colour="black", size=1) +
+    geom_sf(data=PittsburghHighways, color='#6c757d', size=1, alpha=0.8) +
+    labs(title= "Population Change in 2021\nwithout Proposed Highway",
+         subtitle=" ") +
+    mapTheme(), ncol=2
+)
+```
+
+```{r supply demand plot, include=T}
+grid.arrange( # ADD NEW HIGHWAY
+  dat_infill_withHighway %>%
+    ggplot() +  
+    geom_point(aes(x=xyC(dat_infill_withHighway)[,1], y=xyC(dat_infill_withHighway)[,2], colour = factor(ntile(predict_2021.infill,5)))) +
+    scale_colour_manual(values = palette5,
+                      labels=substr(quintileBreaks(dat_infill_withHighway, "predict_2021.infill"),1,8),
+                      name="Predicted\nProbabilities\nin Quintile\nBreaks") +
+    geom_sf(data=Pittsburgh_MSA, fill=NA, colour="black", size=1.5) +
+    geom_sf(data=PittsburghHighways, color='#6c757d', size=1, alpha=0.8) +
+    geom_sf(data=newHighways, fill=NA, colour="#e5989b", size=1) +
+    labs(title= "Development Potential in 2021\nwith Proposed Highway",
+         subtitle="(New highway shown in pink)") +
+    mapTheme(),
+  
+  dat_infill %>%
+    ggplot() +  
+    geom_point(aes(x=xyC(dat_infill)[,1], y=xyC(dat_infill)[,2], colour = factor(ntile(predict_2021.infill,5)))) +
+    scale_colour_manual(values = palette5,
+                      labels=substr(quintileBreaks(dat_infill, "predict_2021.infill"),1,8),
+                      name="Predicted\nProbabilities\nin Quintile\nBreaks") +
+    geom_sf(data=Pittsburgh_MSA, fill=NA, colour="black", size=1) +
+    geom_sf(data=PittsburghHighways, color='#6c757d', size=1, alpha=0.8) +
+    labs(title= "Development Potential in 2021\nwithout Proposed Highway",
+         subtitle=" ") +
+    mapTheme(), ncol=2
+)
+```
 
 # Allocation
 
 ```{r allegheny allocation, include=T}
-dat_name <- dat %>%
-  dplyr::select(NAME)
-
-dat_name_demand <- dat2_demand %>%
-  st_join(., dat_name)
-
 Allegheny <-
-  dat_name_demand %>%
-  filter(NAME == "Allegheny")
+  dat_infill_withHighway %>%
+  filter(NAME == "Allegheny") %>%
+  mutate(Development_Demand = predict_2021.infill)
 
 Allegheny_landUse <- rbind(
-  filter(Allegheny, forest_2011 == 1 | wetlands_2011 == 1 ) %>%
+  filter(Allegheny, forest_2001 == 1 | wetlands_2001 == 1 ) %>% #these are actually 2011.
   dplyr::select() %>% mutate(Land_Use = "Not Suitable"),
-  filter(Allegheny, developed_2011 == 1) %>%
+  filter(Allegheny, developed_2001 == 1) %>%
   dplyr::select() %>% mutate(Land_Use = "Developed"))
 ```
+
 ```{r allegheny plot, include=T}
 grid.arrange(
 ggplot() +
@@ -1155,10 +1301,12 @@ ggplot() +
                                         y=xyC(Allegheny_landUse)[,2], colour=Land_Use),
                                         shape = 18, size = 1) +
   geom_sf(data=st_intersection(PittsburghHighways,filter(Pittsburgh_MSA, NAME=="Allegheny")), color="#6c757d", size=1) +
+  geom_sf(data=st_intersection(newHighways,filter(Pittsburgh_MSA)), color="#e5989b", size=1) +
   scale_fill_manual(values = palette5, name="Development\nDemand",
                     labels=substr(quintileBreaks(Allegheny,"Development_Demand"),1,5)) +
-  scale_colour_manual(values = c("#9163cb","#e29578")) + 
-  labs(title = "Development Potential, \n2021: Allegheny") + mapTheme() +
+  scale_colour_manual(values = c("#FD9235", "#9d8189")) + 
+  labs(title = "Development Potential, \n2021: Allegheny",
+       subtitle="(New highway shown in pink)") + mapTheme() +
   guides(fill = guide_legend(order = 1), colour = guide_legend(order = 2)),
 
 ggplot() +
@@ -1167,48 +1315,56 @@ ggplot() +
                                         y=xyC(Allegheny_landUse)[,2], colour=Land_Use),
                                         shape = 18, size = 1) +
   geom_sf(data=st_intersection(PittsburghHighways,filter(Pittsburgh_MSA, NAME=="Allegheny")), color="#6c757d", size=1) +
+  geom_sf(data=st_intersection(newHighways,filter(Pittsburgh_MSA)), color="#e5989b", size=1) +
   scale_fill_manual(values = palette5, name="Population\nChange",
                     labels=substr(quintileBreaks(Allegheny,"pop_Change"),1,5)) +
-  scale_colour_manual(values =c("#9163cb","#e29578")) + 
-  labs(title = "Projected Population, \n2021: Allegheny") + mapTheme() +
+  scale_colour_manual(values =c("#FD9235", "#9d8189")) + 
+  labs(title = "Projected Population, \n2021: Allegheny",
+       subtitle="(New highway shown in pink)") + mapTheme() +
   guides(fill = guide_legend(order = 1), colour = guide_legend(order = 2)), ncol=2)
+
 ```
 
 
 ```{r armstrong allocation, include=T}
-Armstrong <-
-  dat_name_demand %>%
-  filter(NAME == "Armstrong")
+Washington <-
+  dat_infill_withHighway %>%
+  filter(NAME == "Washington") %>%
+  mutate(Development_Demand = predict_2021.infill)
 
-Armstrong_landUse <- rbind(
-  filter(Armstrong, forest_2011 == 1 | wetlands_2011 == 1 ) %>%
+Washington_landUse <- rbind(
+  filter(Washington, forest_2001 == 1 | wetlands_2001 == 1 ) %>%
   dplyr::select() %>% mutate(Land_Use = "Not Suitable"),
-  filter(Armstrong, developed_2011 == 1) %>%
+  filter(Washington, developed_2001 == 1) %>%
   dplyr::select() %>% mutate(Land_Use = "Developed"))
 
 grid.arrange(
 ggplot() +
-  geom_sf(data=Armstrong, aes(fill=factor(ntile(Development_Demand,5))), colour=NA) +
-  geom_point(data=Armstrong_landUse, aes(x=xyC(Armstrong_landUse)[,1], 
-                                        y=xyC(Armstrong_landUse)[,2], colour=Land_Use),
+  geom_sf(data=Washington, aes(fill=factor(ntile(Development_Demand,5))), colour=NA) +
+  geom_point(data=Washington_landUse, aes(x=xyC(Washington_landUse)[,1], 
+                                        y=xyC(Washington_landUse)[,2], colour=Land_Use),
                                         shape = 18, size = 1) +
-  geom_sf(data=st_intersection(PittsburghHighways,filter(Pittsburgh_MSA, NAME=="Armstrong")), color="#6c757d", size=1) +
+  geom_sf(data=st_intersection(PittsburghHighways,filter(Pittsburgh_MSA, NAME=="Washington")), color="#6c757d", size=1) +
+  geom_sf(data=st_intersection(newHighways,filter(Pittsburgh_MSA)), color="#e5989b", size=1) +
   scale_fill_manual(values = palette5, name="Development\nDemand",
-                    labels=substr(quintileBreaks(Armstrong,"Development_Demand"),1,5)) +
-  scale_colour_manual(values = c("#9163cb","#e29578")) + 
-  labs(title = "Development Potential, 2021: Armstrong") + mapTheme() +
+                    labels=substr(quintileBreaks(Washington,"Development_Demand"),1,5)) +
+  scale_colour_manual(values = c("#FD9235", "#9d8189")) + 
+  labs(title = "Development Potential, \n2021: Washington",
+       subtitle="(New highway shown in pink)") + mapTheme() +
   guides(fill = guide_legend(order = 1), colour = guide_legend(order = 2)),
 
 ggplot() +
-  geom_sf(data=Armstrong, aes(fill=factor(ntile(pop_Change,5))), colour=NA) +
-  geom_point(data=Armstrong_landUse, aes(x=xyC(Armstrong_landUse)[,1], 
-                                        y=xyC(Armstrong_landUse)[,2], colour=Land_Use),
+  geom_sf(data=Washington, aes(fill=factor(ntile(pop_Change,5))), colour=NA) +
+  geom_point(data=Washington_landUse, aes(x=xyC(Washington_landUse)[,1], 
+                                        y=xyC(Washington_landUse)[,2], colour=Land_Use),
                                         shape = 18, size = 1) +
-  geom_sf(data=st_intersection(PittsburghHighways,filter(Pittsburgh_MSA, NAME=="Armstrong")), color="#6c757d", size=1) +
+  geom_sf(data=st_intersection(PittsburghHighways,filter(Pittsburgh_MSA, NAME=="Washington")), color="#6c757d", size=1) +
+  geom_sf(data=st_intersection(newHighways,filter(Pittsburgh_MSA)), color="#e5989b", size=1) +
   scale_fill_manual(values = palette5, name="Population\nChange",
-                    labels=substr(quintileBreaks(Armstrong,"pop_Change"),1,5)) +
-  scale_colour_manual(values = c("#9163cb","#e29578")) + 
-  labs(title = "Projected Population, 2021: Armstrong") + mapTheme() +
+                    labels=substr(quintileBreaks(Washington,"pop_Change"),1,5)) +
+  scale_colour_manual(values = c("#FD9235", "#9d8189")) + 
+  labs(title = "Projected Population, \n2021: Washington",
+       subtitle="(New highway shown in pink)") + mapTheme() +
   guides(fill = guide_legend(order = 1), colour = guide_legend(order = 2)), ncol=2)
 ```
 
